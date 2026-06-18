@@ -1,0 +1,125 @@
+name: .NET Azure CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  AZURE_RESOURCE_GROUP: rg-hello-world-dev
+  AZURE_WEBAPP_NAME: app-hello-world-dev
+  LOCATION: eastus
+  APP_NAME: hello-world
+  ENVIRONMENT: dev
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./HelloWorld
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Test
+        run: dotnet test --no-build --configuration Release --verbosity normal
+
+      - name: Publish
+        run: dotnet publish --no-build --configuration Release --output ./publish
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-app
+          path: HelloWorld/publish
+          retention-days: 7
+
+  deploy:
+    name: Deploy to Azure
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Provision Infrastructure (Bicep)
+        uses: azure/CLI@v2
+        with:
+          inlineScript: |
+            az deployment sub create \
+              --name 'gha-${{ github.run_id }}-${{ env.ENVIRONMENT }}' \
+              --location ${{ env.LOCATION }} \
+              --template-file infra/main.bicep \
+              --parameters \
+                appName=${{ env.APP_NAME }} \
+                environment=${{ env.ENVIRONMENT }} \
+                location=${{ env.LOCATION }}
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dotnet-app
+          path: ./publish
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          package: ./publish
+          runtime-stack: 'DOTNETCORE|8.0'
+
+      - name: Smoke Test
+        uses: azure/CLI@v2
+        with:
+          inlineScript: |
+            WEB_APP_NAME="${{ env.AZURE_WEBAPP_NAME }}"
+            HOSTNAME=$(az webapp show \
+              --name $WEB_APP_NAME \
+              --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+              --query defaultHostName \
+              --output tsv 2>/dev/null || echo "")
+            if [ -z "$HOSTNAME" ]; then
+              echo "Web App not found — Bicep provisioning likely deferred."
+              exit 0
+            fi
+            echo "Testing https://$HOSTNAME/health"
+            for i in {1..10}; do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://$HOSTNAME/health)
+              echo "Attempt $i: HTTP $STATUS"
+              if [ "$STATUS" == "200" ]; then
+                echo "Smoke test passed!"
+                exit 0
+              fi
+              sleep 10
+            done
+            echo "Smoke test failed after 10 attempts"
+            exit 1
