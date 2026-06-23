@@ -1,0 +1,48 @@
+stages:
+  - build
+  - docker
+  - deploy
+
+variables:
+  IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  ACR_NAME: helloacrdev
+  ACR_LOGIN_SERVER: helloacrdev.azurecr.io
+  IMAGE_NAME: helloacrdev.azurecr.io/hello-world:latest
+
+before_script:
+  - dotnet --version
+  - docker --version
+
+build:
+  stage: build
+  image: mcr.microsoft.com/dotnet/sdk:8.0
+  script:
+    - dotnet restore HelloWorld/HelloWorld.csproj
+    - dotnet build HelloWorld/HelloWorld.csproj --configuration Release --no-restore
+    - dotnet publish HelloWorld/HelloWorld.csproj --configuration Release --output ./publish --no-build
+  artifacts:
+    paths:
+      - publish/
+
+docker:
+  stage: docker
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - echo $DOCKER_HUB_PASSWORD | docker login -u $DOCKER_HUB_USERNAME --password-stdin
+  script:
+    - docker build -t $IMAGE_NAME .
+    - docker push $IMAGE_NAME
+  only:
+    - main
+
+deploy_azure:
+  stage: deploy
+  image: mcr.microsoft.com/azure-cli
+  script:
+    - az login --service-principal -u $AZURE_SP_APP_ID -p $AZURE_SP_PASSWORD --tenant $AZURE_SP_TENANT_ID
+    - az account set --subscription $AZURE_SUBSCRIPTION_ID
+    - az deployment sub create --name gitlab-$CI_PIPELINE_ID --location eastus --template-file infra/main.bicep --parameters appName=hello-world environment=dev location=eastus
+  only:
+    - main

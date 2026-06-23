@@ -1,0 +1,13 @@
+Dockerfile
+.git
+.gitlab-ci.yml
+README.md
+node_modules
+bin/
+obj/
+*.user
+*.suo
+.vscode/
+.idea/
+*.pdb
+*.log
